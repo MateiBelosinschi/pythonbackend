@@ -39,16 +39,30 @@ def load_audio(audio_bytes: bytes) -> Tuple[np.ndarray, int]:
     if not audio_bytes:
         raise AudioDecodeError("Empty audio payload")
 
-    buffer = io.BytesIO(audio_bytes)
+    import os
+    import tempfile
+
+    # On crit les octets dans un fichier temporaire car librosa (via audioread/ffmpeg)
+    # a besoin d'un chemin de fichier r el pour d coder les formats compress s
+    # comme WebM ou MP3 envoy s par les navigateurs.
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".tmp") as temp_file:
+        temp_file.write(audio_bytes)
+        temp_path = temp_file.name
+
     try:
         samples, sr = librosa.load(
-            buffer,
+            temp_path,
             sr=settings.SAMPLE_RATE,
             mono=True,
             dtype=np.float32,
         )
     except Exception as exc:  # noqa: BLE001 — on enveloppe en erreur m tier
         raise AudioDecodeError(f"Failed to decode audio: {exc}") from exc
+    finally:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
 
     if samples.size == 0:
         raise AudioDecodeError("Decoded audio is empty")
