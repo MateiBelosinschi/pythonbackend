@@ -24,14 +24,7 @@ logger = logging.getLogger("app")
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    # Warmup CREPE pour ne pas payer le chargement du mod le sur la 1re requ te.
-    # On l'importe paresseusement pour permettre des d marrages "soft" en dev
-    # quand TensorFlow n'est pas install .
-    try:
-        from app.services.pitch_detection import warmup as crepe_warmup
-        crepe_warmup()
-    except Exception:  # noqa: BLE001
-        logger.exception("Skipping CREPE warmup at startup")
+    # Skipped warmup to prevent Railway timeout/OOM during startup
     yield
 
 
