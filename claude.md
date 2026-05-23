@@ -1,58 +1,62 @@
 # CLAUDE.md
 
 ## Project
-Backend API for humming-to-sheet-music transcription: users upload audio → system detects pitch → transcribes to notes → transposes for different instruments → exports to MIDI/MusicXML.
+Backend API for humming-to-sheet-music transcription: users record audio to a click track → system detects pitch (CREPE) → quantizes to a strict 120 BPM grid via NumPy → returns Concert Pitch notes JSON. (Frontend handles VexFlow visual rendering and instant instrument transposition). Backend also provides endpoints for MIDI export.
 
 ## Stack
 - **Language**: Python 3.9+
 - **Framework**: FastAPI
 - **Server**: Uvicorn
 - **Pitch Detection**: Crepe (TensorFlow)
-- **Music Theory**: Music21 (MIT)
-- **Audio Processing**: librosa, scipy
-- **Export**: music21 (MusicXML), mido (MIDI)
-- **Deployment**: Docker, Heroku/AWS Lambda
+- **Audio Processing**: librosa, scipy, numpy
+- **Export**: mido (MIDI)
+- **Deployment**: Railway
 - **Package Manager**: pip
 
 ## Commands
 - Dev: `uvicorn app.main:app --reload --host 0.0.0.0 --port 8000`
 - Build: `docker build -t melody-scribe-api .`
-- Test single: `pytest tests/test_transposer.py -v`
+- Test single: `pytest tests/test_export.py -v`
 - Test all: `pytest`
 - Lint: `flake8 app/ --max-line-length=100`
 - Type check: `mypy app/`
 
 ## Architecture
 - `app/api/` → API endpoint definitions, request/response models (Pydantic)
-- `app/services/` → Core business logic (pitch detection, quantization, transposition, export)
-- `app/utils/` → Helper functions, constants (instrument definitions, MIDI mappings, note names)
+- `app/services/` → Core business logic (pitch detection, 120 BPM numpy quantization, MIDI export)
+- `app/utils/` → Helper functions, constants (MIDI mappings, 120 BPM duration buckets, note names)
 - `app/config.py` → Configuration management (environment variables, API settings)
 - `main.py` → FastAPI app initialization, middleware, route mounting
 - `requirements.txt` → Python dependencies
-- `Dockerfile` → Docker container setup
+- `Dockerfile` → Docker container setup (used by Railway)
 - `tests/` → Unit tests for each service
 
-## Rules
-- **Music Theory Accuracy**: Always validate MIDI numbers are in valid range (0-127). Never allow out-of-bounds MIDI values to be exported.
-- **Instrument Range Checking**: Before transposing, verify that transposed notes fit within the instrument's documented range. Warn but don't fail—still export if out of range.
-- **Floating Point Precision**: Round all frequency-to-MIDI conversions to nearest integer semitone. Never export unquantized decimal pitches.
-- **File Handling**: Always clean up temporary audio files after processing. Use `try/finally` blocks to ensure temp files are deleted even if processing fails.
-- **API Response Format**: Every response must include `status`, `data`, and `error` fields (even if error is null). Maintain consistent JSON structure across all endpoints.
-- **Tempo Bounds**: Validate tempo is between 30-300 BPM. Reject requests outside this range with a clear error message.
-- **IMPORTANT**: When exporting to MIDI, always verify duration_beats is positive and non-zero. A zero-duration note will cause the MIDI file to be malformed and unplayable.
+## Data Contracts
 
-## Workflow
-- **Approach**: When adding a feature, start with the service (app/services/), then add the API route (app/api/routes.py), then add tests.
-- **Commit Conventions**: `feat: add X`, `fix: resolve X`, `docs: update X`, `test: add tests for X`, `refactor: simplify X`
-- **Testing Expectations**: Every service class method should have at least one unit test. Happy path + error case minimum. Test with realistic audio values (frequencies 60-2000 Hz).
-- **When to Ask vs Act**: Ask before modifying API contracts (routes, request/response models). Act on service improvements, test additions, or bug fixes. Ask before adding new external dependencies.
+### 1. Backend API Response Model (Pydantic)
+from pydantic import BaseModel
+from typing import List, Optional
 
-## Out of scope
-- Frontend code (React, Vue, HTML/CSS)
-- Tone.js or any browser-side audio playback
-- Vexflow or sheet music rendering (that's frontend)
-- Deployment infrastructure (DevOps/terraform)
-- User authentication or database models
-- Production monitoring/logging setup (basic logging is fine)
-- Modifying `Dockerfile` without Docker knowledge
-- AI model retraining or fine-tuning Crepe
+class MusicalNoteSchema(BaseModel):
+    pitch: str         # e.g., "C4", "G#5"
+    duration: str      # VexFlow style: "w", "h", "q", "8", "16"
+    isRest: bool       # True if this chunk represents silence/noise
+
+class TranscriptionResponse(BaseModel):
+    status: str        # "success" | "error"
+    data: Optional[List[MusicalNoteSchema]] = None
+    error: Optional[str] = None
+
+### 2. Frontend State / Response Types (TypeScript)
+
+export interface MusicalNote {
+  pitch: string;         // Standard pitch e.g., "C4", "Bb5"
+  duration: string;      // VexFlow format: "w", "h", "q", "8", "16"
+  isRest: boolean;       // True if this block was silence/noise
+}
+
+export interface TranscriptionResponse {
+  status: "success" | "error";
+  data: MusicalNote[] | null;
+  error: string | null;
+}
