@@ -1,0 +1,16 @@
+project = "melody-scribe-api"
+
+[[services]]
+name = "api"
+path = "."
+# Start command used by Railway. Uses $PORT provided by Railway environment.
+start = "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+# Build step executed during deploy (simple pip install). For more control, use a Dockerfile.
+build = "python -m pip install --upgrade pip && python -m pip install -r requirements.txt"
+
+[variables]
+PORT = "8000"
+
+# Notes:
+# - If you prefer Docker, add a Dockerfile and remove the `build` line above.
+# - Railway will inject a runtime PORT; we default to 8000 for local parity.

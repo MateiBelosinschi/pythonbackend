@@ -1,9 +1,30 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+import logging
 
-app = FastAPI(title="pythonbackend", version="0.1.0")
+from app.config import settings
+from app.api.routes import router
 
+# Setup Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+app = FastAPI(
+    title=settings.APP_TITLE,
+    version=settings.APP_VERSION,
+    description="API for humming-to-sheet-music transcription using CREPE and music21"
+)
+
+# CORS configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -12,50 +33,52 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_items: list[dict] = []
-_next_id = 1
+# Mount Routes
+app.include_router(router)
 
+# Custom Exception Handlers for Unified API Response Shape
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    logger.error(f"HTTP exception: {exc.detail} (status: {exc.status_code})")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "status": "error",
+            "data": None,
+            "error": exc.detail
+        }
+    )
 
-class ItemCreate(BaseModel):
-    name: str
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    errors = exc.errors()
+    # Build a friendly error message from validation errors
+    msg_parts = []
+    for err in errors:
+        loc = " -> ".join(str(x) for x in err.get("loc", []))
+        msg = err.get("msg", "Unknown error")
+        msg_parts.append(f"[{loc}]: {msg}")
+    
+    error_msg = "Validation failed: " + "; ".join(msg_parts)
+    logger.warning(error_msg)
+    
+    return JSONResponse(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        content={
+            "status": "error",
+            "data": None,
+            "error": error_msg
+        }
+    )
 
-
-class ItemResponse(BaseModel):
-    id: int
-    name: str
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-
-@app.get("/api/items", response_model=list[ItemResponse])
-def list_items():
-    return _items
-
-
-@app.get("/api/items/{item_id}", response_model=ItemResponse)
-def get_item(item_id: int):
-    for item in _items:
-        if item["id"] == item_id:
-            return item
-    raise HTTPException(status_code=404, detail="Item not found")
-
-
-@app.post("/api/items", response_model=ItemResponse, status_code=201)
-def create_item(payload: ItemCreate):
-    global _next_id
-    item = {"id": _next_id, "name": payload.name}
-    _next_id += 1
-    _items.append(item)
-    return item
-
-
-@app.delete("/api/items/{item_id}", status_code=204)
-def delete_item(item_id: int):
-    for index, item in enumerate(_items):
-        if item["id"] == item_id:
-            _items.pop(index)
-            return
-    raise HTTPException(status_code=404, detail="Item not found")
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={
+            "status": "error",
+            "data": None,
+            "error": f"Internal Server Error: {str(exc)}"
+        }
+    )
