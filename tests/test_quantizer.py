@@ -14,10 +14,13 @@ from app.config import settings
 from app.services.quantizer import (
     REST_CELL,
     REST_PITCH_NAME,
+    QuantizeParams,
     cells_to_runs,
     quantize_cells,
+    quantize_pipeline,
     quantize_to_notes,
     runs_to_notes,
+    smooth_cell_pitches,
 )
 from app.utils.music import midi_to_pitch_name
 
@@ -87,9 +90,26 @@ class TestQuantizeCells:
         cells = quantize_cells(times, freqs, confs, rms, duration)
         assert cells.tolist() == [REST_CELL]
 
+    def test_sustain_with_low_ratio_but_enough_voiced_frames(self):
+        """Tenue : ≥2 frames voisées suffisent même si ratio < VOICED_RATIO_THRESHOLD."""
+        times, freqs, confs, rms, duration = _make_frames([60])
+        # ~12 frames par cellule : on garde 2 voisées, le reste silencieux
+        confs[:] = 0.0
+        rms[:] = 0.0
+        freqs[:] = 0.0
+        confs[0] = 0.9
+        confs[1] = 0.9
+        rms[0] = 0.1
+        rms[1] = 0.1
+        hz = 440.0 * (2.0 ** ((60 - 69) / 12.0))
+        freqs[0] = hz
+        freqs[1] = hz
+        cells = quantize_cells(times, freqs, confs, rms, duration)
+        assert cells.tolist() == [60]
+
     def test_low_rms_marks_rest(self):
         times, freqs, confs, rms, duration = _make_frames([60])
-        rms[:] = 0.001  # en dessous du seuil 0.01
+        rms[:] = 0.001  # en dessous du seuil 0.005
         cells = quantize_cells(times, freqs, confs, rms, duration)
         assert cells.tolist() == [REST_CELL]
 
@@ -193,3 +213,101 @@ def test_midi_to_pitch_name_used_for_runs():
     times, freqs, confs, rms, duration = _make_frames(seq)
     notes = quantize_to_notes(times, freqs, confs, rms, duration)
     assert notes[0].pitch == midi_to_pitch_name(70)
+
+
+class TestSmoothCellPitches:
+    def test_unifies_minority_drift_on_long_sustain(self):
+        cells = np.array([67] * 6 + [68] * 2, dtype=np.int64)
+        smoothed = smooth_cell_pitches(cells)
+        assert smoothed.tolist() == [67] * 8
+
+    def test_preserves_real_interval_change(self):
+        cells = np.array([60, 60, 67, 67], dtype=np.int64)
+        smoothed = smooth_cell_pitches(cells)
+        assert smoothed.tolist() == [60, 60, 67, 67]
+
+    def test_preserves_equal_split_melodic_step(self):
+        cells = np.array([65] * 4 + [64] * 4, dtype=np.int64)
+        smoothed = smooth_cell_pitches(cells)
+        assert smoothed.tolist() == [65, 65, 65, 65, 64, 64, 64, 64]
+
+
+class TestGridOffset:
+    def test_offset_shifts_cell_assignment(self):
+        times, freqs, confs, rms, duration = _make_frames([REST_CELL, 60])
+        cells_no_offset = quantize_cells(times, freqs, confs, rms, duration)
+        assert cells_no_offset[1] == 60
+
+        params = QuantizeParams(grid_offset_sec=CELL_SEC)
+        cells_offset = quantize_cells(
+            times, freqs, confs, rms, duration, params=params
+        )
+        assert cells_offset[0] == 60
+        assert cells_offset[1] == REST_CELL
+
+
+class TestDebugPipeline:
+    def test_debug_includes_crepe_track_and_cells(self):
+        times, freqs, confs, rms, duration = _make_frames([60, 60, 67, 67])
+        result = quantize_pipeline(
+            times, freqs, confs, rms, duration, debug=True
+        )
+        assert result.debug is not None
+        assert len(result.debug.crepe_track) == times.size
+        assert len(result.debug.cells) == 4
+        assert result.debug.grid.bpm == settings.BPM
+        assert result.debug.grid.offset_sec == 0.0
+
+
+TWINKLE_CELLS: List[int] = (
+    [60] * 4 + [60] * 4 + [67] * 4 + [67] * 4
+    + [69] * 4 + [69] * 4 + [67] * 8
+    + [65] * 4 + [65] * 4 + [64] * 4 + [64] * 4
+    + [62] * 4 + [62] * 4 + [60] * 8
+)
+
+
+class TestTwinkleTwinkle:
+    def test_produces_six_distinct_pitches(self):
+        times, freqs, confs, rms, duration = _make_frames(TWINKLE_CELLS)
+        notes = quantize_to_notes(times, freqs, confs, rms, duration)
+        pitches = {n.pitch for n in notes if not n.isRest}
+        assert pitches == {"C4", "D4", "E4", "F4", "G4", "A4"}
+
+    def test_half_note_sustains_are_not_split(self):
+        times, freqs, confs, rms, duration = _make_frames(TWINKLE_CELLS)
+        cells = quantize_cells(times, freqs, confs, rms, duration)
+        runs = cells_to_runs(cells)
+        g4_half = next(
+            (length for value, length in runs if value == 67 and length == 8),
+            None,
+        )
+        c4_half = next(
+            (length for value, length in runs if value == 60 and length == 8),
+            None,
+        )
+        assert g4_half == 8
+        assert c4_half == 8
+
+    def test_sustain_survives_one_semitone_drift(self):
+        seq = [67] * 8
+        times, freqs, confs, rms, duration = _make_frames(seq)
+        hz_g = 440.0 * (2.0 ** ((67 - 69) / 12.0))
+        hz_gs = 440.0 * (2.0 ** ((68 - 69) / 12.0))
+        mid = len(freqs) // 2
+        freqs[mid:] = hz_gs
+        freqs[:mid] = hz_g
+        cells = quantize_cells(times, freqs, confs, rms, duration)
+        # Dérive 50/50 : le lissage ne fusionne pas, mais le run reste continu.
+        assert cells.tolist() == [67, 67, 67, 67, 68, 68, 68, 68]
+        runs = cells_to_runs(cells)
+        assert runs == [(67, 4), (68, 4)]
+
+    def test_expected_merged_note_sequence(self):
+        """Notes consécutives de même hauteur sont fusionnées en runs plus longs."""
+        times, freqs, confs, rms, duration = _make_frames(TWINKLE_CELLS)
+        notes = quantize_to_notes(times, freqs, confs, rms, duration)
+        assert [(n.pitch, n.duration) for n in notes] == [
+            ("C4", "h"), ("G4", "h"), ("A4", "h"), ("G4", "h"),
+            ("F4", "h"), ("E4", "h"), ("D4", "h"), ("C4", "h"),
+        ]

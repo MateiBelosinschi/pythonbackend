@@ -1,26 +1,28 @@
-"""Quantification d'une piste de fr quences CREPE vers la grille rythmique 120 BPM.
+"""Quantification d'une piste de fréquences CREPE vers la grille rythmique.
 
 Pipeline :
-1. Pour chaque cellule de la grille (16e de note  120 BPM = 125 ms), on
-   r colte les frames CREPE qui tombent dedans.
-2. On d cide si la cellule est "voix pr sente" via un vote majoritaire sur
-   la confiance CREPE et le RMS du frame correspondant.
-3. Le pitch de la cellule est la m diane (en demi-tons) des frames vois es,
-   arrondie au demi-ton entier puis "clamp e"  la plage vocale autoris e
-   (hors plage => silence).
-4. On fusionne les cellules adjacentes de m me pitch en runs ``(pitch, length)``.
-5. Chaque run est d compos  en une suite de dur es VexFlow (w, h, q, 8, 16) ;
-   un run plus long qu'une ronde produit plusieurs ``MusicalNoteSchema``
-   cons cutives de m me pitch (le frontend peut ensuite lier visuellement).
+1. Pour chaque cellule de la grille (16e de note), on regroupe les frames CREPE.
+2. On décide si la cellule est "voix présente" via confiance CREPE + RMS.
+3. Le pitch de la cellule est la médiane (en demi-tons) des frames voisées,
+   arrondie au demi-ton entier puis filtrée par la plage vocale autorisée.
+4. Lissage inter-cellules (hystérésis) pour stabiliser les notes tenues.
+5. On fusionne les cellules adjacentes de même pitch en runs ``(pitch, length)``.
+6. Chaque run est décomposé en durées VexFlow (w, h, q, 8, 16).
 """
 from __future__ import annotations
 
 import math
-from typing import List, Tuple
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
 
 import numpy as np
 
-from app.api.schemas import MusicalNoteSchema
+from app.api.schemas import (
+    CrepeFrameDebug,
+    GridMetadata,
+    MusicalNoteSchema,
+    TranscriptionDebugInfo,
+)
 from app.config import settings
 from app.utils.music import (
     decompose_sixteenths,
@@ -29,30 +31,51 @@ from app.utils.music import (
 )
 
 
-# Valeur sentinelle dans le tableau de cellules pour repr senter un silence.
+# Valeur sentinelle dans le tableau de cellules pour représenter un silence.
 REST_CELL: int = -1
 
-# Convention de nom utilis e pour le champ ``pitch`` quand ``isRest=True``.
+# Convention de nom utilisée pour le champ ``pitch`` quand ``isRest=True``.
 REST_PITCH_NAME: str = "rest"
 
-# Seuil de vote majoritaire : il faut au moins 50% de frames "vois es"
-# dans une cellule pour la consid rer comme une note.
-VOICED_RATIO_THRESHOLD: float = 0.5
+
+@dataclass(frozen=True)
+class QuantizeParams:
+    """Paramètres de grille surchargables par requête."""
+
+    bpm: int = settings.BPM
+    grid_offset_sec: float = 0.0
+
+    @property
+    def cell_seconds(self) -> float:
+        return 60.0 / self.bpm / settings.SUBDIVISIONS_PER_BEAT
+
+
+@dataclass
+class QuantizeResult:
+    notes: List[MusicalNoteSchema]
+    cells: np.ndarray
+    debug: Optional[TranscriptionDebugInfo] = None
 
 
 def _align_rms_to_times(rms: np.ndarray, times_sec: np.ndarray) -> np.ndarray:
-    """Pour chaque time stamp CREPE, retourne la valeur RMS du frame correspondant.
-
-    Les deux arrays sont cens s utiliser le m me ``STEP_MS`` mais peuvent avoir
-    une longueur l g rement diff rente (effets de bord / centrage). On fait
-    donc un mapping par index direct avec clipping aux bornes.
-    """
+    """Pour chaque timestamp CREPE, retourne la valeur RMS du frame correspondant."""
     if rms.size == 0:
         return np.zeros_like(times_sec, dtype=np.float32)
+    if rms.size == times_sec.size:
+        return np.asarray(rms, dtype=np.float32)
     step_sec = settings.step_seconds
     idx = np.rint(times_sec / step_sec).astype(np.int64)
     idx = np.clip(idx, 0, rms.size - 1)
     return rms[idx]
+
+
+def _cell_is_voiced(voiced_count: int, total: int) -> bool:
+    """Décide si une cellule compte comme voisée (vote assoupli pour sustains)."""
+    if total == 0:
+        return False
+    if voiced_count >= settings.MIN_VOICED_FRAMES_PER_CELL:
+        return True
+    return voiced_count / total >= settings.VOICED_RATIO_THRESHOLD
 
 
 def quantize_cells(
@@ -61,29 +84,17 @@ def quantize_cells(
     confidences: np.ndarray,
     rms: np.ndarray,
     duration_sec: float,
+    params: Optional[QuantizeParams] = None,
 ) -> np.ndarray:
-    """Calcule le tableau de cellules (1 valeur par 16e de note).
-
-    Args:
-        times_sec: timestamps CREPE (1D, secondes).
-        freqs_hz:  fr quences CREPE (1D, Hz, 0 = non d tect ).
-        confidences: confiances CREPE (1D, dans [0, 1]).
-        rms: enveloppe RMS du signal (1D, m me hop que ``STEP_MS``).
-        duration_sec: dur e totale du signal en secondes (utilis e pour
-            d terminer le nombre de cellules).
-
-    Returns:
-        ``np.ndarray`` 1D ``int64`` de longueur ``n_cells``. Chaque entr e est
-        soit un num ro MIDI valide (dans la plage vocale), soit ``REST_CELL``.
-    """
-    cell_sec = settings.cell_seconds
-    n_cells = max(0, int(math.floor(duration_sec / cell_sec + 1e-9)))
+    """Calcule le tableau de cellules (1 valeur par 16e de note)."""
+    qp = params or QuantizeParams()
+    cell_sec = qp.cell_seconds
+    n_cells = max(0, int(math.ceil(duration_sec / cell_sec - 1e-9)))
     cells = np.full(n_cells, REST_CELL, dtype=np.int64)
     if n_cells == 0 or times_sec.size == 0:
         return cells
 
-    # Frame -> index de cellule
-    cell_idx = np.floor(times_sec / cell_sec).astype(np.int64)
+    cell_idx = np.floor((times_sec - qp.grid_offset_sec) / cell_sec).astype(np.int64)
     in_range = (cell_idx >= 0) & (cell_idx < n_cells)
     if not np.any(in_range):
         return cells
@@ -101,13 +112,11 @@ def quantize_cells(
         & (freqs > 0)
     )
 
-    # Tri stable des frames par cellule pour pouvoir bucketiser efficacement.
     order = np.argsort(cell_idx, kind="stable")
     sorted_cells = cell_idx[order]
     sorted_freqs = freqs[order]
     sorted_voiced = voiced_mask[order]
 
-    # Bornes de chaque bucket dans le tableau tri .
     unique_cells, start_idx = np.unique(sorted_cells, return_index=True)
     end_idx = np.append(start_idx[1:], sorted_cells.size)
 
@@ -117,8 +126,8 @@ def quantize_cells(
             continue
         voiced_in_cell = sorted_voiced[lo:hi]
         voiced_count = int(voiced_in_cell.sum())
-        if voiced_count / total < VOICED_RATIO_THRESHOLD:
-            continue  # reste REST_CELL
+        if not _cell_is_voiced(voiced_count, total):
+            continue
 
         cell_freqs = sorted_freqs[lo:hi][voiced_in_cell]
         if cell_freqs.size == 0:
@@ -131,18 +140,52 @@ def quantize_cells(
 
         midi_int = int(round(float(np.median(midi_values))))
         if midi_int < settings.MIDI_MIN or midi_int > settings.MIDI_MAX:
-            continue  # hors plage vocale -> on garde le silence
+            continue
 
         cells[cell_id] = midi_int
 
-    return cells
+    return smooth_cell_pitches(cells)
+
+
+def smooth_cell_pitches(cells: np.ndarray) -> np.ndarray:
+    """Stabilise les notes tenues en corrigeant une dérive minoritaire de pitch."""
+    if cells.size == 0:
+        return cells
+
+    result = cells.copy()
+    tolerance = settings.PITCH_HYSTERESIS_SEMITONES
+    min_sustain_cells = 4
+
+    i = 0
+    while i < result.size:
+        if result[i] == REST_CELL:
+            i += 1
+            continue
+
+        run_start = i
+        while i < result.size and result[i] != REST_CELL:
+            if i > run_start and abs(int(result[i]) - int(result[i - 1])) > tolerance:
+                break
+            i += 1
+
+        run = result[run_start:i]
+        if run.size < min_sustain_cells:
+            continue
+
+        pitch_range = int(run.max()) - int(run.min())
+        if pitch_range > tolerance:
+            continue
+
+        anchor = int(result[run_start])
+        drift_count = int(np.sum(run != anchor))
+        if 0 < drift_count < run.size // 2:
+            result[run_start:i] = anchor
+
+    return result
 
 
 def cells_to_runs(cells: np.ndarray) -> List[Tuple[int, int]]:
-    """Fusionne les cellules adjacentes  gales en runs ``(value, length_16ths)``.
-
-    ``value`` est soit un num ro MIDI, soit ``REST_CELL`` pour un silence.
-    """
+    """Fusionne les cellules adjacentes égales en runs ``(value, length_16ths)``."""
     runs: List[Tuple[int, int]] = []
     if cells.size == 0:
         return runs
@@ -162,12 +205,7 @@ def cells_to_runs(cells: np.ndarray) -> List[Tuple[int, int]]:
 
 
 def runs_to_notes(runs: List[Tuple[int, int]]) -> List[MusicalNoteSchema]:
-    """Convertit des runs en une liste plate de ``MusicalNoteSchema``.
-
-    Une dur e non repr sentable par un seul symbole VexFlow (ex. 6 = q + 8,
-    20 = w + q) est rendue par plusieurs ``MusicalNoteSchema`` cons cutives
-    avec le m me pitch — convention partag e avec le frontend.
-    """
+    """Convertit des runs en une liste plate de ``MusicalNoteSchema``."""
     notes: List[MusicalNoteSchema] = []
     for value, length in runs:
         if length <= 0:
@@ -185,14 +223,74 @@ def runs_to_notes(runs: List[Tuple[int, int]]) -> List[MusicalNoteSchema]:
     return notes
 
 
+def build_crepe_debug_track(
+    times_sec: np.ndarray,
+    freqs_hz: np.ndarray,
+    confidences: np.ndarray,
+) -> List[CrepeFrameDebug]:
+    """Construit la piste CREPE frame par frame pour le mode debug."""
+    midi_values = hz_array_to_midi(freqs_hz)
+    track: List[CrepeFrameDebug] = []
+    for t, freq, conf, midi in zip(times_sec, freqs_hz, confidences, midi_values):
+        midi_rounded: Optional[int] = None
+        if not math.isnan(midi) and freq > 0:
+            midi_rounded = int(round(float(midi)))
+        track.append(
+            CrepeFrameDebug(
+                time=float(t),
+                freq_hz=float(freq),
+                confidence=float(conf),
+                midi_rounded=midi_rounded,
+            )
+        )
+    return track
+
+
+def _cells_to_debug_list(cells: np.ndarray) -> List[Optional[int]]:
+    return [None if int(v) == REST_CELL else int(v) for v in cells]
+
+
+def quantize_pipeline(
+    times_sec: np.ndarray,
+    freqs_hz: np.ndarray,
+    confidences: np.ndarray,
+    rms: np.ndarray,
+    duration_sec: float,
+    params: Optional[QuantizeParams] = None,
+    debug: bool = False,
+) -> QuantizeResult:
+    """Pipeline complet : frames CREPE -> notes (+ debug optionnel)."""
+    qp = params or QuantizeParams()
+    cells = quantize_cells(
+        times_sec, freqs_hz, confidences, rms, duration_sec, params=qp
+    )
+    runs = cells_to_runs(cells)
+    notes = runs_to_notes(runs)
+
+    debug_info: Optional[TranscriptionDebugInfo] = None
+    if debug:
+        debug_info = TranscriptionDebugInfo(
+            crepe_track=build_crepe_debug_track(times_sec, freqs_hz, confidences),
+            cells=_cells_to_debug_list(cells),
+            grid=GridMetadata(
+                bpm=qp.bpm,
+                cell_seconds=qp.cell_seconds,
+                offset_sec=qp.grid_offset_sec,
+            ),
+        )
+
+    return QuantizeResult(notes=notes, cells=cells, debug=debug_info)
+
+
 def quantize_to_notes(
     times_sec: np.ndarray,
     freqs_hz: np.ndarray,
     confidences: np.ndarray,
     rms: np.ndarray,
     duration_sec: float,
+    params: Optional[QuantizeParams] = None,
 ) -> List[MusicalNoteSchema]:
     """Helper de bout en bout : frames CREPE -> liste de ``MusicalNoteSchema``."""
-    cells = quantize_cells(times_sec, freqs_hz, confidences, rms, duration_sec)
-    runs = cells_to_runs(cells)
-    return runs_to_notes(runs)
+    return quantize_pipeline(
+        times_sec, freqs_hz, confidences, rms, duration_sec, params=params
+    ).notes

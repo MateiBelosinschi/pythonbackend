@@ -53,12 +53,18 @@ class Settings:
 
     # Seuils de d tection "voix pr sente" par frame
     CONFIDENCE_THRESHOLD: float = 0.5
-    # RMS normalis  (audio en float32 [-1, 1]). 0.01 ~ -40 dBFS.
-    RMS_THRESHOLD: float = 0.01
+    # RMS normalis  (audio en float32 [-1, 1]). 0.005 ~ -46 dBFS.
+    RMS_THRESHOLD: float = 0.005
+
+    # Vote majoritaire par cellule de grille (16e de note).
+    VOICED_RATIO_THRESHOLD: float = 0.35
+    # Fallback sustain : au moins N frames vois es suffisent m me si ratio bas.
+    MIN_VOICED_FRAMES_PER_CELL: int = 2
+    # Hyst r sis inter-cellules : tol re de d calage en demi-tons sur une tenue.
+    PITCH_HYSTERESIS_SEMITONES: int = 1
 
     # Mod le CREPE: "tiny" | "small" | "medium" | "large" | "full".
-    # tiny est largement suffisant pour de la voix humm e sur Railway CPU.
-    CREPE_MODEL: str = "tiny"
+    CREPE_MODEL: str = "small"
 
     # Activer le lissage Viterbi de CREPE (plus pr cis, ~2x plus lent).
     CREPE_VITERBI: bool = True
@@ -88,8 +94,11 @@ def _load_settings() -> Settings:
         MIDI_MIN=_env_int("MIDI_MIN", 36),
         MIDI_MAX=_env_int("MIDI_MAX", 84),
         CONFIDENCE_THRESHOLD=_env_float("CONFIDENCE_THRESHOLD", 0.5),
-        RMS_THRESHOLD=_env_float("RMS_THRESHOLD", 0.01),
-        CREPE_MODEL=_env_str("CREPE_MODEL", "tiny"),
+        RMS_THRESHOLD=_env_float("RMS_THRESHOLD", 0.005),
+        VOICED_RATIO_THRESHOLD=_env_float("VOICED_RATIO_THRESHOLD", 0.35),
+        MIN_VOICED_FRAMES_PER_CELL=_env_int("MIN_VOICED_FRAMES_PER_CELL", 2),
+        PITCH_HYSTERESIS_SEMITONES=_env_int("PITCH_HYSTERESIS_SEMITONES", 1),
+        CREPE_MODEL=_env_str("CREPE_MODEL", "small"),
         CREPE_VITERBI=_env_str("CREPE_VITERBI", "1") not in ("0", "false", "False"),
         MAX_UPLOAD_BYTES=_env_int("MAX_UPLOAD_BYTES", 25 * 1024 * 1024),
     )

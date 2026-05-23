@@ -26,10 +26,42 @@ class MusicalNoteSchema(BaseModel):
     )
 
 
+class CrepeFrameDebug(BaseModel):
+    time: float = Field(..., description="Timestamp du frame CREPE en secondes.")
+    freq_hz: float = Field(..., description="Fréquence estimée en Hz (0 si non voisée).")
+    confidence: float = Field(..., description="Confiance CREPE dans [0, 1].")
+    midi_rounded: Optional[int] = Field(
+        None,
+        description="Numéro MIDI arrondi au demi-ton, ou null si non voisée.",
+    )
+
+
+class GridMetadata(BaseModel):
+    bpm: int = Field(..., description="Tempo utilisé pour la grille.")
+    cell_seconds: float = Field(..., description="Durée d'une cellule (16e de note) en secondes.")
+    offset_sec: float = Field(
+        ...,
+        description="Décalage appliqué entre t=0 du fichier et le temps 1 du métronome.",
+    )
+
+
+class TranscriptionDebugInfo(BaseModel):
+    crepe_track: List[CrepeFrameDebug] = Field(
+        ...,
+        description="Piste CREPE frame par frame pour diagnostic.",
+    )
+    cells: List[Optional[int]] = Field(
+        ...,
+        description="Pitch MIDI par cellule de grille (null = silence).",
+    )
+    grid: GridMetadata = Field(..., description="Paramètres de la grille rythmique.")
+
+
 class TranscriptionResponse(BaseModel):
     status: Literal["success", "error"]
     data: Optional[List[MusicalNoteSchema]] = None
     error: Optional[str] = None
+    debug: Optional[TranscriptionDebugInfo] = None
 
 
 class MidiExportRequest(BaseModel):
