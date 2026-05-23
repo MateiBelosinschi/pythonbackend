@@ -1,61 +1,63 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+"""Point d'entr e FastAPI du backend de transcription humming -> notes."""
+from __future__ import annotations
 
-app = FastAPI(title="pythonbackend", version="0.1.0")
+import logging
+import os
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api.export import router as export_router
+from app.api.transcribe import router as transcribe_router
+from app.config import settings
+
+# TensorFlow / CREPE sont tr s verbeux par d faut ; on calme les logs.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("app")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Warmup CREPE pour ne pas payer le chargement du mod le sur la 1re requ te.
+    # On l'importe paresseusement pour permettre des d marrages "soft" en dev
+    # quand TensorFlow n'est pas install .
+    try:
+        from app.services.pitch_detection import warmup as crepe_warmup
+        crepe_warmup()
+    except Exception:  # noqa: BLE001
+        logger.exception("Skipping CREPE warmup at startup")
+    yield
+
+
+app = FastAPI(
+    title="melody-scribe-api",
+    version="0.1.0",
+    description=(
+        "Backend de transcription audio fredonn  -> notes quantif es 120 BPM. "
+        "Pipeline: CREPE (pitch detection) -> quantification numpy -> JSON."
+    ),
+    lifespan=lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=list(settings.CORS_ORIGINS),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-_items: list[dict] = []
-_next_id = 1
 
-
-class ItemCreate(BaseModel):
-    name: str
-
-
-class ItemResponse(BaseModel):
-    id: int
-    name: str
-
-
-@app.get("/health")
-def health():
+@app.get("/health", tags=["health"])
+def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/api/items", response_model=list[ItemResponse])
-def list_items():
-    return _items
-
-
-@app.get("/api/items/{item_id}", response_model=ItemResponse)
-def get_item(item_id: int):
-    for item in _items:
-        if item["id"] == item_id:
-            return item
-    raise HTTPException(status_code=404, detail="Item not found")
-
-
-@app.post("/api/items", response_model=ItemResponse, status_code=201)
-def create_item(payload: ItemCreate):
-    global _next_id
-    item = {"id": _next_id, "name": payload.name}
-    _next_id += 1
-    _items.append(item)
-    return item
-
-
-@app.delete("/api/items/{item_id}", status_code=204)
-def delete_item(item_id: int):
-    for index, item in enumerate(_items):
-        if item["id"] == item_id:
-            _items.pop(index)
-            return
-    raise HTTPException(status_code=404, detail="Item not found")
+app.include_router(transcribe_router, prefix="/api")
+app.include_router(export_router, prefix="/api")
