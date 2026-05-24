@@ -30,7 +30,7 @@ def transcribe(
     frame_threshold: float = 0.3,
     minimum_note_length: float = 120.0,
     minimum_frequency: float = 65.0,
-    maximum_frequency: float = 1000.0,
+    maximum_frequency: float = 2000.0,
     melodia_trick: bool = True,
 ) -> pretty_midi.PrettyMIDI:
     """Run basic-pitch on a pre-processed waveform and return the resulting MIDI.
