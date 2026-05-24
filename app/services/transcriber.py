@@ -26,18 +26,21 @@ _MODEL_PATH = ICASSP_2022_MODEL_PATH
 def transcribe(
     waveform: np.ndarray,
     sr: int,
-    onset_threshold: float = 0.5,
+    onset_threshold: float = 0.6,
     frame_threshold: float = 0.3,
-    minimum_note_length: float = 70.0,
+    minimum_note_length: float = 110.0,
     minimum_frequency: float = 65.0,
     maximum_frequency: float = 1000.0,
 ) -> pretty_midi.PrettyMIDI:
     """Run basic-pitch on a pre-processed waveform and return the resulting MIDI.
 
-    Defaults match basic-pitch's own (and Spotify's hosted demo) so that raw
-    transcription quality is on par with what users hear there; the cleanup
-    layer downstream does the monophonic polishing. The frequency band is
-    widened to 65 Hz so low male humming (~A2/B2) isn't silently dropped.
+    Tuned for closed-mouth sustained humming, where basic-pitch's defaults emit
+    glissando passing-tone fragments as the voice slides between target notes.
+    `minimum_note_length=110ms` kills sub-16th-note fragments (a real 16th at
+    120 BPM is 125 ms, so we're under it). `onset_threshold=0.6` rejects the
+    soft pitch-crossing "onsets" inside a slide while still catching syllable
+    attacks. Frequency band stays wide at 65 Hz so low male hum survives —
+    `melody_cleanup.normalize_octave` re-anchors to the treble afterward.
     """
     fd, path = tempfile.mkstemp(suffix=".wav", prefix="musicme_")
     os.close(fd)
