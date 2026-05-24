@@ -15,6 +15,8 @@ from app.services.quantizer import (
     REST_CELL,
     REST_PITCH_NAME,
     QuantizeParams,
+    bridge_short_pitched_islands,
+    bridge_short_rest_runs,
     cells_to_runs,
     quantize_cells,
     quantize_pipeline,
@@ -157,23 +159,25 @@ class TestRunsToNotes:
         assert notes[0].isRest is False
 
     def test_long_note_decomposed(self):
-        # 6 sixteenths of A4 -> q + 8 (m me pitch)
+        # 6 sixteenths of A4 -> 2 noires
         notes = runs_to_notes([(69, 6)])
         assert [(n.pitch, n.duration, n.isRest) for n in notes] == [
             ("A4", "q", False),
-            ("A4", "8", False),
+            ("A4", "q", False),
         ]
 
-    def test_rest_run(self):
+    def test_short_rest_run_omitted(self):
         notes = runs_to_notes([(REST_CELL, 2)])
-        assert len(notes) == 1
-        assert notes[0].isRest is True
-        assert notes[0].duration == "8"
-        assert notes[0].pitch == REST_PITCH_NAME
+        assert notes == []
+
+    def test_long_rest_run_quarters(self):
+        notes = runs_to_notes([(REST_CELL, 8)])
+        assert len(notes) == 2
+        assert all(n.isRest and n.duration == "q" and n.pitch == REST_PITCH_NAME for n in notes)
 
     def test_whole_plus_quarter(self):
-        notes = runs_to_notes([(60, 20)])  # > whole
-        assert [n.duration for n in notes] == ["w", "q"]
+        notes = runs_to_notes([(60, 20)])
+        assert [n.duration for n in notes] == ["q", "q", "q", "q", "q"]
         assert all(n.pitch == "C4" for n in notes)
 
 
@@ -185,18 +189,16 @@ class TestQuantizeToNotesEndToEnd:
         notes = quantize_to_notes(times, freqs, confs, rms, duration)
         assert [(n.pitch, n.duration, n.isRest) for n in notes] == [
             ("C4", "q", False),
-            (REST_PITCH_NAME, "8", True),
             ("E4", "q", False),
         ]
 
     def test_whole_note(self):
-        # 16 cellules de m me pitch -> ronde
+        # 16 cellules de m me pitch -> 4 noires
         seq = [62] * 16  # D4
         times, freqs, confs, rms, duration = _make_frames(seq)
         notes = quantize_to_notes(times, freqs, confs, rms, duration)
-        assert len(notes) == 1
-        assert notes[0].pitch == "D4"
-        assert notes[0].duration == "w"
+        assert len(notes) == 4
+        assert all(n.pitch == "D4" and n.duration == "q" and not n.isRest for n in notes)
 
     def test_pitch_names_use_sharps_only(self):
         # F#4 = MIDI 66
@@ -213,6 +215,43 @@ def test_midi_to_pitch_name_used_for_runs():
     times, freqs, confs, rms, duration = _make_frames(seq)
     notes = quantize_to_notes(times, freqs, confs, rms, duration)
     assert notes[0].pitch == midi_to_pitch_name(70)
+
+
+class TestBridgeShortRestRuns:
+    def test_bridges_gap_between_voiced_regions(self):
+        cells = np.array([60, 60, REST_CELL, REST_CELL, 64, 64], dtype=np.int64)
+        runs = bridge_short_rest_runs(cells_to_runs(cells))
+        assert runs == [(60, 2), (64, 2)]
+
+    def test_keeps_long_rest_between_voiced_regions(self):
+        cells = np.array([60] * 4 + [REST_CELL] * 8 + [64] * 4, dtype=np.int64)
+        runs = bridge_short_rest_runs(cells_to_runs(cells))
+        assert runs == cells_to_runs(cells)
+
+    def test_leaves_short_leading_trailing_rest(self):
+        cells = np.array([REST_CELL, REST_CELL, 60, 60, REST_CELL], dtype=np.int64)
+        runs = bridge_short_rest_runs(cells_to_runs(cells))
+        assert runs == cells_to_runs(cells)
+
+
+class TestBridgeShortPitchedIslands:
+    def test_absorbs_one_cell_island_into_previous(self):
+        cells = np.array([60, 60, 60, 60, 62, 64, 64, 64, 64], dtype=np.int64)
+        bridged = bridge_short_pitched_islands(cells)
+        assert bridged.tolist() == [60] * 5 + [64] * 4
+
+    def test_absorbs_island_into_next_when_no_previous(self):
+        cells = np.array([62, 64, 64, 64, 64], dtype=np.int64)
+        bridged = bridge_short_pitched_islands(cells)
+        assert bridged.tolist() == [64, 64, 64, 64, 64]
+
+    def test_removes_isolated_island_between_long_rests(self):
+        cells = np.array(
+            [REST_CELL] * 8 + [62] + [REST_CELL] * 8,
+            dtype=np.int64,
+        )
+        bridged = bridge_short_pitched_islands(cells)
+        assert bridged.tolist() == [REST_CELL] * 17
 
 
 class TestSmoothCellPitches:
@@ -307,7 +346,7 @@ class TestTwinkleTwinkle:
         """Notes consécutives de même hauteur sont fusionnées en runs plus longs."""
         times, freqs, confs, rms, duration = _make_frames(TWINKLE_CELLS)
         notes = quantize_to_notes(times, freqs, confs, rms, duration)
-        assert [(n.pitch, n.duration) for n in notes] == [
-            ("C4", "h"), ("G4", "h"), ("A4", "h"), ("G4", "h"),
-            ("F4", "h"), ("E4", "h"), ("D4", "h"), ("C4", "h"),
-        ]
+        expected = []
+        for pitch in ("C4", "G4", "A4", "G4", "F4", "E4", "D4", "C4"):
+            expected.extend([(pitch, "q"), (pitch, "q")])
+        assert [(n.pitch, n.duration) for n in notes] == expected

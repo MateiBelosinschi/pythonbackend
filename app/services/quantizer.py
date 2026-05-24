@@ -6,8 +6,9 @@ Pipeline :
 3. Le pitch de la cellule est la médiane (en demi-tons) des frames voisées,
    arrondie au demi-ton entier puis filtrée par la plage vocale autorisée.
 4. Lissage inter-cellules (hystérésis) pour stabiliser les notes tenues.
-5. On fusionne les cellules adjacentes de même pitch en runs ``(pitch, length)``.
-6. Chaque run est décomposé en durées VexFlow (w, h, q, 8, 16).
+5. Comblement des micro-silences et des îlots pitch courts.
+6. On fusionne les cellules adjacentes de même pitch en runs ``(pitch, length)``.
+7. Chaque run est émis en noires (``q``) uniquement.
 """
 from __future__ import annotations
 
@@ -24,11 +25,7 @@ from app.api.schemas import (
     TranscriptionDebugInfo,
 )
 from app.config import settings
-from app.utils.music import (
-    decompose_sixteenths,
-    hz_array_to_midi,
-    midi_to_pitch_name,
-)
+from app.utils.music import hz_array_to_midi, midi_to_pitch_name
 
 
 # Valeur sentinelle dans le tableau de cellules pour représenter un silence.
@@ -184,6 +181,83 @@ def smooth_cell_pitches(cells: np.ndarray) -> np.ndarray:
     return result
 
 
+def _neighbor_pitched_midi(cells: np.ndarray, start: int, end: int) -> Tuple[Optional[int], Optional[int]]:
+    """Retourne le MIDI voisé immédiatement avant ``start`` et après ``end``."""
+    prev_pitch: Optional[int] = None
+    for j in range(start - 1, -1, -1):
+        if int(cells[j]) != REST_CELL:
+            prev_pitch = int(cells[j])
+            break
+
+    next_pitch: Optional[int] = None
+    for j in range(end, cells.size):
+        if int(cells[j]) != REST_CELL:
+            next_pitch = int(cells[j])
+            break
+
+    return prev_pitch, next_pitch
+
+
+def bridge_short_rest_runs(runs: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    """Retire les silences courts entre deux zones voisées (pas tête/queue)."""
+    if not runs:
+        return runs
+
+    bridged: List[Tuple[int, int]] = []
+    for idx, (value, length) in enumerate(runs):
+        if value != REST_CELL or length > settings.MAX_BRIDGE_GAP_CELLS:
+            bridged.append((value, length))
+            continue
+
+        prev_pitched = idx > 0 and runs[idx - 1][0] != REST_CELL
+        next_pitched = idx < len(runs) - 1 and runs[idx + 1][0] != REST_CELL
+        if prev_pitched and next_pitched:
+            continue
+
+        bridged.append((value, length))
+
+    return bridged
+
+
+def bridge_short_pitched_islands(cells: np.ndarray) -> np.ndarray:
+    """Fusionne les runs voisés plus courts qu'une noire avec le pitch voisin."""
+    if cells.size == 0:
+        return cells
+
+    result = cells.copy()
+    i = 0
+    while i < result.size:
+        if int(result[i]) == REST_CELL:
+            i += 1
+            continue
+
+        run_start = i
+        anchor = int(result[run_start])
+        while i < result.size and int(result[i]) != REST_CELL:
+            if int(result[i]) != anchor:
+                break
+            i += 1
+        run_len = i - run_start
+
+        if run_len >= settings.MIN_PITCHED_CELLS:
+            continue
+
+        prev_pitch, next_pitch = _neighbor_pitched_midi(result, run_start, i)
+        if prev_pitch is not None:
+            result[run_start:i] = prev_pitch
+        elif next_pitch is not None:
+            result[run_start:i] = next_pitch
+        else:
+            result[run_start:i] = REST_CELL
+
+    return result
+
+
+def _sixteenths_to_quarter_count(length: int) -> int:
+    """Convertit une longueur en 16e en nombre de noires (arrondi au supérieur)."""
+    return (length + 3) // 4
+
+
 def cells_to_runs(cells: np.ndarray) -> List[Tuple[int, int]]:
     """Fusionne les cellules adjacentes égales en runs ``(value, length_16ths)``."""
     runs: List[Tuple[int, int]] = []
@@ -205,18 +279,22 @@ def cells_to_runs(cells: np.ndarray) -> List[Tuple[int, int]]:
 
 
 def runs_to_notes(runs: List[Tuple[int, int]]) -> List[MusicalNoteSchema]:
-    """Convertit des runs en une liste plate de ``MusicalNoteSchema``."""
+    """Convertit des runs en noires uniquement (``duration="q"``)."""
     notes: List[MusicalNoteSchema] = []
     for value, length in runs:
         if length <= 0:
             continue
         is_rest = value == REST_CELL
+        if is_rest and length < settings.MIN_REST_CELLS:
+            continue
+
+        quarter_count = _sixteenths_to_quarter_count(length)
         pitch_name = REST_PITCH_NAME if is_rest else midi_to_pitch_name(value)
-        for symbol in decompose_sixteenths(length):
+        for _ in range(quarter_count):
             notes.append(
                 MusicalNoteSchema(
                     pitch=pitch_name,
-                    duration=symbol,  # type: ignore[arg-type]
+                    duration="q",
                     isRest=is_rest,
                 )
             )
@@ -264,7 +342,8 @@ def quantize_pipeline(
     cells = quantize_cells(
         times_sec, freqs_hz, confidences, rms, duration_sec, params=qp
     )
-    runs = cells_to_runs(cells)
+    cells = bridge_short_pitched_islands(cells)
+    runs = bridge_short_rest_runs(cells_to_runs(cells))
     notes = runs_to_notes(runs)
 
     debug_info: Optional[TranscriptionDebugInfo] = None

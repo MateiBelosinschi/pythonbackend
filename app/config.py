@@ -63,6 +63,14 @@ class Settings:
     # Hyst r sis inter-cellules : tol re de d calage en demi-tons sur une tenue.
     PITCH_HYSTERESIS_SEMITONES: int = 1
 
+    # Post-quantification : silences et îlots pitch courts.
+    # Silence conservé seulement si >= MIN_REST_CELLS (8 = 1 blanche).
+    MIN_REST_CELLS: int = 8
+    # Note voisée minimale ; en dessous, l'îlot est fusionné avec le voisin.
+    MIN_PITCHED_CELLS: int = 4
+    # Trous de silence comblés si longueur <= MAX_BRIDGE_GAP_CELLS (7).
+    MAX_BRIDGE_GAP_CELLS: int = 7
+
     # Mod le CREPE: "tiny" | "small" | "medium" | "large" | "full".
     CREPE_MODEL: str = "small"
 
@@ -98,6 +106,9 @@ def _load_settings() -> Settings:
         VOICED_RATIO_THRESHOLD=_env_float("VOICED_RATIO_THRESHOLD", 0.35),
         MIN_VOICED_FRAMES_PER_CELL=_env_int("MIN_VOICED_FRAMES_PER_CELL", 2),
         PITCH_HYSTERESIS_SEMITONES=_env_int("PITCH_HYSTERESIS_SEMITONES", 1),
+        MIN_REST_CELLS=_env_int("MIN_REST_CELLS", 8),
+        MIN_PITCHED_CELLS=_env_int("MIN_PITCHED_CELLS", 4),
+        MAX_BRIDGE_GAP_CELLS=_env_int("MAX_BRIDGE_GAP_CELLS", 7),
         CREPE_MODEL=_env_str("CREPE_MODEL", "small"),
         CREPE_VITERBI=_env_str("CREPE_VITERBI", "1") not in ("0", "false", "False"),
         MAX_UPLOAD_BYTES=_env_int("MAX_UPLOAD_BYTES", 25 * 1024 * 1024),
