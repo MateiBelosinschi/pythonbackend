@@ -26,17 +26,18 @@ _MODEL_PATH = ICASSP_2022_MODEL_PATH
 def transcribe(
     waveform: np.ndarray,
     sr: int,
-    onset_threshold: float = 0.8,
+    onset_threshold: float = 0.5,
     frame_threshold: float = 0.3,
-    minimum_note_length: float = 180.0,
-    minimum_frequency: float = 130.0,
+    minimum_note_length: float = 70.0,
+    minimum_frequency: float = 65.0,
     maximum_frequency: float = 1000.0,
 ) -> pretty_midi.PrettyMIDI:
     """Run basic-pitch on a pre-processed waveform and return the resulting MIDI.
 
-    Defaults are tuned for vocal humming: a ~70-1000 Hz band covers male+female
-    vocal range while killing the sub-bass octave-error ghosts basic-pitch
-    likes to invent, and a stricter onset threshold cuts pitch-wobble noise.
+    Defaults match basic-pitch's own (and Spotify's hosted demo) so that raw
+    transcription quality is on par with what users hear there; the cleanup
+    layer downstream does the monophonic polishing. The frequency band is
+    widened to 65 Hz so low male humming (~A2/B2) isn't silently dropped.
     """
     fd, path = tempfile.mkstemp(suffix=".wav", prefix="musicme_")
     os.close(fd)

@@ -14,7 +14,7 @@ import librosa
 import numpy as np
 
 TARGET_SAMPLE_RATE: int = 22050
-DEFAULT_GATE_DB: float = -35.0
+DEFAULT_GATE_DB: float = -55.0
 GATE_FRAME_MS: float = 20.0
 
 

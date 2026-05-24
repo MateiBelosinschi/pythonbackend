@@ -37,18 +37,34 @@ def collapse_to_melody(
     if not notes:
         return []
 
-    # Pass 1: group by start cell, pick a winner per cell.
+    # Pass 1: one note per start cell. When a collision is the SAME pitch (a
+    # held syllable re-detected as two onsets), keep the louder one. When the
+    # collision is a DIFFERENT pitch (two real hummed notes that happened to
+    # snap to the same 16th cell because the user's tempo ≠ 120 BPM), bump
+    # the loser forward to the next free cell instead of deleting it —
+    # silently dropping notes here is the biggest source of "missing notes"
+    # complaints from end users.
     winners: Dict[int, Note] = {}
-    for n in notes:
+    for n in sorted(notes, key=lambda x: x.start):
         key = _cell(n.start, bpm, subdivision)
         current = winners.get(key)
         if current is None:
             winners[key] = n
             continue
-        if n.velocity > current.velocity:
-            winners[key] = n
-        elif n.velocity == current.velocity and n.pitch < current.pitch:
-            winners[key] = n
+        if current.pitch == n.pitch:
+            # Same pitch: dedupe, keep the louder candidate.
+            if n.velocity > current.velocity:
+                winners[key] = n
+            continue
+        # Different pitch: pick the louder for this cell, push the other to
+        # the next empty cell so it survives.
+        loser = current if n.velocity > current.velocity else n
+        winner = n if n.velocity > current.velocity else current
+        winners[key] = winner
+        next_key = key + 1
+        while next_key in winners:
+            next_key += 1
+        winners[next_key] = loser
 
     melody = sorted(winners.values(), key=lambda x: x.start)
 
