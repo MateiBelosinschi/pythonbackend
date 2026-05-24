@@ -15,6 +15,8 @@ WORKDIR /app
 
 COPY requirements.txt .
 
+# pretty_midi imports `pkg_resources`, which setuptools>=81 removed.
+# Pin setuptools first so the rest of the install resolves cleanly.
 RUN pip install --upgrade pip \
     && pip install "setuptools<81" wheel \
     && pip install --no-build-isolation -r requirements.txt

@@ -1,375 +1,100 @@
-"""Quantification d'une piste de fréquences CREPE vers la grille rythmique.
+"""120 BPM, 16th-note rigid time quantization.
 
-Pipeline :
-1. Pour chaque cellule de la grille (16e de note), on regroupe les frames CREPE.
-2. On décide si la cellule est "voix présente" via confiance CREPE + RMS.
-3. Le pitch de la cellule est la médiane (en demi-tons) des frames voisées,
-   arrondie au demi-ton entier puis filtrée par la plage vocale autorisée.
-4. Lissage inter-cellules (hystérésis) pour stabiliser les notes tenues.
-5. Comblement des micro-silences et des îlots pitch courts.
-6. On fusionne les cellules adjacentes de même pitch en runs ``(pitch, length)``.
-7. Chaque run est émis en noires (``q``) uniquement.
+CLAUDE.md is explicit: no manual NumPy/list arithmetic for grid timings.
+Every conversion between seconds and grid units goes through `pretty_midi`'s
+`time_to_tick` / `tick_to_time` helpers, which respect the symbolic tempo map.
 """
+
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List
 
-import numpy as np
+import pretty_midi
 
-from app.api.schemas import (
-    CrepeFrameDebug,
-    GridMetadata,
-    MusicalNoteSchema,
-    TranscriptionDebugInfo,
-)
-from app.config import settings
-from app.utils.music import hz_array_to_midi, midi_to_pitch_name
+from app.models import FIXED_BPM, GRID_SUBDIVISION, Note
 
 
-# Valeur sentinelle dans le tableau de cellules pour représenter un silence.
-REST_CELL: int = -1
-
-# Convention de nom utilisée pour le champ ``pitch`` quand ``isRest=True``.
-REST_PITCH_NAME: str = "rest"
-
-
-@dataclass(frozen=True)
-class QuantizeParams:
-    """Paramètres de grille surchargables par requête."""
-
-    bpm: int = settings.BPM
-    grid_offset_sec: float = 0.0
-
-    @property
-    def cell_seconds(self) -> float:
-        return 60.0 / self.bpm / settings.SUBDIVISIONS_PER_BEAT
+def _grid_tick_step(pm: pretty_midi.PrettyMIDI, subdivision: int) -> int:
+    """Number of ticks per grid cell (e.g. 16 for sixteenth notes)."""
+    # `resolution` is ticks per quarter note. A 16th note = quarter / 4.
+    quarter_ticks = pm.resolution
+    # subdivision=16 means 16th notes => quarter_ticks / 4. subdivision=8 => /2. etc.
+    cells_per_quarter = subdivision // 4
+    if cells_per_quarter < 1:
+        raise ValueError(f"subdivision must be >= 4, got {subdivision}")
+    return quarter_ticks // cells_per_quarter
 
 
-@dataclass
-class QuantizeResult:
-    notes: List[MusicalNoteSchema]
-    cells: np.ndarray
-    debug: Optional[TranscriptionDebugInfo] = None
+def _snap_tick(tick: int, step: int) -> int:
+    """Round a tick value to the nearest grid step."""
+    return int(round(tick / step)) * step
 
 
-def _align_rms_to_times(rms: np.ndarray, times_sec: np.ndarray) -> np.ndarray:
-    """Pour chaque timestamp CREPE, retourne la valeur RMS du frame correspondant."""
-    if rms.size == 0:
-        return np.zeros_like(times_sec, dtype=np.float32)
-    if rms.size == times_sec.size:
-        return np.asarray(rms, dtype=np.float32)
-    step_sec = settings.step_seconds
-    idx = np.rint(times_sec / step_sec).astype(np.int64)
-    idx = np.clip(idx, 0, rms.size - 1)
-    return rms[idx]
+def quantize(
+    pm: pretty_midi.PrettyMIDI,
+    bpm: int = FIXED_BPM,
+    subdivision: int = GRID_SUBDIVISION,
+) -> List[Note]:
+    """Snap all notes in `pm` to a rigid `subdivision`-grid at `bpm`, return Concert Pitch JSON notes.
 
-
-def _cell_is_voiced(voiced_count: int, total: int) -> bool:
-    """Décide si une cellule compte comme voisée (vote assoupli pour sustains)."""
-    if total == 0:
-        return False
-    if voiced_count >= settings.MIN_VOICED_FRAMES_PER_CELL:
-        return True
-    return voiced_count / total >= settings.VOICED_RATIO_THRESHOLD
-
-
-def quantize_cells(
-    times_sec: np.ndarray,
-    freqs_hz: np.ndarray,
-    confidences: np.ndarray,
-    rms: np.ndarray,
-    duration_sec: float,
-    params: Optional[QuantizeParams] = None,
-) -> np.ndarray:
-    """Calcule le tableau de cellules (1 valeur par 16e de note)."""
-    qp = params or QuantizeParams()
-    cell_sec = qp.cell_seconds
-    n_cells = max(0, int(math.ceil(duration_sec / cell_sec - 1e-9)))
-    cells = np.full(n_cells, REST_CELL, dtype=np.int64)
-    if n_cells == 0 or times_sec.size == 0:
-        return cells
-
-    cell_idx = np.floor((times_sec - qp.grid_offset_sec) / cell_sec).astype(np.int64)
-    in_range = (cell_idx >= 0) & (cell_idx < n_cells)
-    if not np.any(in_range):
-        return cells
-
-    cell_idx = cell_idx[in_range]
-    freqs = freqs_hz[in_range]
-    conf = confidences[in_range]
-    times_in = times_sec[in_range]
-
-    rms_per_frame = _align_rms_to_times(rms, times_in)
-
-    voiced_mask = (
-        (conf >= settings.CONFIDENCE_THRESHOLD)
-        & (rms_per_frame >= settings.RMS_THRESHOLD)
-        & (freqs > 0)
-    )
-
-    order = np.argsort(cell_idx, kind="stable")
-    sorted_cells = cell_idx[order]
-    sorted_freqs = freqs[order]
-    sorted_voiced = voiced_mask[order]
-
-    unique_cells, start_idx = np.unique(sorted_cells, return_index=True)
-    end_idx = np.append(start_idx[1:], sorted_cells.size)
-
-    for cell_id, lo, hi in zip(unique_cells, start_idx, end_idx):
-        total = hi - lo
-        if total == 0:
-            continue
-        voiced_in_cell = sorted_voiced[lo:hi]
-        voiced_count = int(voiced_in_cell.sum())
-        if not _cell_is_voiced(voiced_count, total):
-            continue
-
-        cell_freqs = sorted_freqs[lo:hi][voiced_in_cell]
-        if cell_freqs.size == 0:
-            continue
-
-        midi_values = hz_array_to_midi(cell_freqs)
-        midi_values = midi_values[~np.isnan(midi_values)]
-        if midi_values.size == 0:
-            continue
-
-        midi_int = int(round(float(np.median(midi_values))))
-        if midi_int < settings.MIDI_MIN or midi_int > settings.MIDI_MAX:
-            continue
-
-        cells[cell_id] = midi_int
-
-    return smooth_cell_pitches(cells)
-
-
-def smooth_cell_pitches(cells: np.ndarray) -> np.ndarray:
-    """Stabilise les notes tenues en corrigeant une dérive minoritaire de pitch."""
-    if cells.size == 0:
-        return cells
-
-    result = cells.copy()
-    tolerance = settings.PITCH_HYSTERESIS_SEMITONES
-    min_sustain_cells = 4
-
-    i = 0
-    while i < result.size:
-        if result[i] == REST_CELL:
-            i += 1
-            continue
-
-        run_start = i
-        while i < result.size and result[i] != REST_CELL:
-            if i > run_start and abs(int(result[i]) - int(result[i - 1])) > tolerance:
-                break
-            i += 1
-
-        run = result[run_start:i]
-        if run.size < min_sustain_cells:
-            continue
-
-        pitch_range = int(run.max()) - int(run.min())
-        if pitch_range > tolerance:
-            continue
-
-        anchor = int(result[run_start])
-        drift_count = int(np.sum(run != anchor))
-        if 0 < drift_count < run.size // 2:
-            result[run_start:i] = anchor
-
-    return result
-
-
-def _neighbor_pitched_midi(cells: np.ndarray, start: int, end: int) -> Tuple[Optional[int], Optional[int]]:
-    """Retourne le MIDI voisé immédiatement avant ``start`` et après ``end``."""
-    prev_pitch: Optional[int] = None
-    for j in range(start - 1, -1, -1):
-        if int(cells[j]) != REST_CELL:
-            prev_pitch = int(cells[j])
-            break
-
-    next_pitch: Optional[int] = None
-    for j in range(end, cells.size):
-        if int(cells[j]) != REST_CELL:
-            next_pitch = int(cells[j])
-            break
-
-    return prev_pitch, next_pitch
-
-
-def bridge_short_rest_runs(runs: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
-    """Retire les silences courts entre deux zones voisées (pas tête/queue)."""
-    if not runs:
-        return runs
-
-    bridged: List[Tuple[int, int]] = []
-    for idx, (value, length) in enumerate(runs):
-        if value != REST_CELL or length > settings.MAX_BRIDGE_GAP_CELLS:
-            bridged.append((value, length))
-            continue
-
-        prev_pitched = idx > 0 and runs[idx - 1][0] != REST_CELL
-        next_pitched = idx < len(runs) - 1 and runs[idx + 1][0] != REST_CELL
-        if prev_pitched and next_pitched:
-            continue
-
-        bridged.append((value, length))
-
-    return bridged
-
-
-def bridge_short_pitched_islands(cells: np.ndarray) -> np.ndarray:
-    """Fusionne les runs voisés plus courts qu'une noire avec le pitch voisin."""
-    if cells.size == 0:
-        return cells
-
-    result = cells.copy()
-    i = 0
-    while i < result.size:
-        if int(result[i]) == REST_CELL:
-            i += 1
-            continue
-
-        run_start = i
-        anchor = int(result[run_start])
-        while i < result.size and int(result[i]) != REST_CELL:
-            if int(result[i]) != anchor:
-                break
-            i += 1
-        run_len = i - run_start
-
-        if run_len >= settings.MIN_PITCHED_CELLS:
-            continue
-
-        prev_pitch, next_pitch = _neighbor_pitched_midi(result, run_start, i)
-        if prev_pitch is not None:
-            result[run_start:i] = prev_pitch
-        elif next_pitch is not None:
-            result[run_start:i] = next_pitch
-        else:
-            result[run_start:i] = REST_CELL
-
-    return result
-
-
-def _sixteenths_to_quarter_count(length: int) -> int:
-    """Convertit une longueur en 16e en nombre de noires (arrondi au supérieur)."""
-    return (length + 3) // 4
-
-
-def cells_to_runs(cells: np.ndarray) -> List[Tuple[int, int]]:
-    """Fusionne les cellules adjacentes égales en runs ``(value, length_16ths)``."""
-    runs: List[Tuple[int, int]] = []
-    if cells.size == 0:
-        return runs
-
-    current_value = int(cells[0])
-    current_length = 1
-    for v in cells[1:]:
-        v_int = int(v)
-        if v_int == current_value:
-            current_length += 1
-        else:
-            runs.append((current_value, current_length))
-            current_value = v_int
-            current_length = 1
-    runs.append((current_value, current_length))
-    return runs
-
-
-def runs_to_notes(runs: List[Tuple[int, int]]) -> List[MusicalNoteSchema]:
-    """Convertit des runs en noires uniquement (``duration="q"``)."""
-    notes: List[MusicalNoteSchema] = []
-    for value, length in runs:
-        if length <= 0:
-            continue
-        is_rest = value == REST_CELL
-        if is_rest and length < settings.MIN_REST_CELLS:
-            continue
-
-        quarter_count = _sixteenths_to_quarter_count(length)
-        pitch_name = REST_PITCH_NAME if is_rest else midi_to_pitch_name(value)
-        for _ in range(quarter_count):
-            notes.append(
-                MusicalNoteSchema(
-                    pitch=pitch_name,
-                    duration="q",
-                    isRest=is_rest,
-                )
+    A note whose start and end collapse onto the same grid cell is dropped — it
+    represents a sub-grid blip (often a basic-pitch onset glitch) that the
+    quantization explicitly disallows.
+    """
+    # Re-anchor tempo so pretty_midi's time<->tick maps reflect the target BPM.
+    # We build a fresh PrettyMIDI at the fixed BPM and copy notes into it so that
+    # `time_to_tick` uses the correct mapping.
+    target = pretty_midi.PrettyMIDI(initial_tempo=float(bpm), resolution=pm.resolution)
+    instrument = pretty_midi.Instrument(program=0)
+    for src_inst in pm.instruments:
+        for n in src_inst.notes:
+            instrument.notes.append(
+                pretty_midi.Note(velocity=n.velocity, pitch=n.pitch, start=n.start, end=n.end)
             )
-    return notes
+    target.instruments.append(instrument)
 
+    step = _grid_tick_step(target, subdivision)
+    quantized: List[Note] = []
 
-def build_crepe_debug_track(
-    times_sec: np.ndarray,
-    freqs_hz: np.ndarray,
-    confidences: np.ndarray,
-) -> List[CrepeFrameDebug]:
-    """Construit la piste CREPE frame par frame pour le mode debug."""
-    midi_values = hz_array_to_midi(freqs_hz)
-    track: List[CrepeFrameDebug] = []
-    for t, freq, conf, midi in zip(times_sec, freqs_hz, confidences, midi_values):
-        midi_rounded: Optional[int] = None
-        if not math.isnan(midi) and freq > 0:
-            midi_rounded = int(round(float(midi)))
-        track.append(
-            CrepeFrameDebug(
-                time=float(t),
-                freq_hz=float(freq),
-                confidence=float(conf),
-                midi_rounded=midi_rounded,
+    for n in instrument.notes:
+        start_tick = _snap_tick(target.time_to_tick(n.start), step)
+        end_tick = _snap_tick(target.time_to_tick(n.end), step)
+
+        if end_tick <= start_tick:
+            # Promote to a single grid cell rather than dropping silently — preserves
+            # the onset but enforces the minimum 16th-note duration.
+            end_tick = start_tick + step
+
+        quantized.append(
+            Note(
+                pitch=int(n.pitch),
+                start=float(target.tick_to_time(start_tick)),
+                end=float(target.tick_to_time(end_tick)),
+                velocity=int(n.velocity),
             )
         )
-    return track
+
+    quantized.sort(key=lambda x: (x.start, x.pitch))
+    return quantized
 
 
-def _cells_to_debug_list(cells: np.ndarray) -> List[Optional[int]]:
-    return [None if int(v) == REST_CELL else int(v) for v in cells]
+def notes_to_midi(notes: List[Note], bpm: int = FIXED_BPM) -> bytes:
+    """Render Concert Pitch notes back to a MIDI file byte stream."""
+    import io
 
-
-def quantize_pipeline(
-    times_sec: np.ndarray,
-    freqs_hz: np.ndarray,
-    confidences: np.ndarray,
-    rms: np.ndarray,
-    duration_sec: float,
-    params: Optional[QuantizeParams] = None,
-    debug: bool = False,
-) -> QuantizeResult:
-    """Pipeline complet : frames CREPE -> notes (+ debug optionnel)."""
-    qp = params or QuantizeParams()
-    cells = quantize_cells(
-        times_sec, freqs_hz, confidences, rms, duration_sec, params=qp
-    )
-    cells = bridge_short_pitched_islands(cells)
-    runs = bridge_short_rest_runs(cells_to_runs(cells))
-    notes = runs_to_notes(runs)
-
-    debug_info: Optional[TranscriptionDebugInfo] = None
-    if debug:
-        debug_info = TranscriptionDebugInfo(
-            crepe_track=build_crepe_debug_track(times_sec, freqs_hz, confidences),
-            cells=_cells_to_debug_list(cells),
-            grid=GridMetadata(
-                bpm=qp.bpm,
-                cell_seconds=qp.cell_seconds,
-                offset_sec=qp.grid_offset_sec,
-            ),
+    pm = pretty_midi.PrettyMIDI(initial_tempo=float(bpm))
+    instrument = pretty_midi.Instrument(program=0)
+    for note in notes:
+        instrument.notes.append(
+            pretty_midi.Note(
+                velocity=note.velocity,
+                pitch=note.pitch,
+                start=note.start,
+                end=note.end,
+            )
         )
+    pm.instruments.append(instrument)
 
-    return QuantizeResult(notes=notes, cells=cells, debug=debug_info)
-
-
-def quantize_to_notes(
-    times_sec: np.ndarray,
-    freqs_hz: np.ndarray,
-    confidences: np.ndarray,
-    rms: np.ndarray,
-    duration_sec: float,
-    params: Optional[QuantizeParams] = None,
-) -> List[MusicalNoteSchema]:
-    """Helper de bout en bout : frames CREPE -> liste de ``MusicalNoteSchema``."""
-    return quantize_pipeline(
-        times_sec, freqs_hz, confidences, rms, duration_sec, params=params
-    ).notes
+    buf = io.BytesIO()
+    pm.write(buf)
+    return buf.getvalue()

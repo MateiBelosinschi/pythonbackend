@@ -1,10 +1,37 @@
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+.Python
 .venv/
-.env
-.idea/
-.vscode/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 *.egg-info/
-dist/
 build/
+dist/
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Project artifacts
+*.mid
+*.wav
+*.mp3
+!tests/fixtures/*.wav
+coverage/
+.coverage
+.venv/install.log
+.venv/server.log
+.venv/pipeline_test.log
