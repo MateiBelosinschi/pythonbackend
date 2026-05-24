@@ -23,7 +23,7 @@ from __future__ import annotations
 from statistics import median
 from typing import List
 
-from app.models import Note
+from app.models import CleanupOptions, Note, RepeatStrategy
 
 # Treble clef sweet-spot: A3 (lowest comfortable ledger line below) to G5
 # (just above the top staff line). Anchor on E4 — middle of the staff.
@@ -183,39 +183,67 @@ def smooth_octave_jumps(notes: List[Note], max_passes: int = 4) -> List[Note]:
     return current
 
 
-def dedup_consecutive_repeats(notes: List[Note], max_gap: float = 0.15) -> List[Note]:
-    """Merge consecutive same-pitch notes that follow within `max_gap` seconds.
+def group_consecutive_repeats(
+    notes: List[Note],
+    strategy: RepeatStrategy = "merge",
+    max_gap: float = 0.15,
+) -> List[Note]:
+    """Decide what to do with consecutive same-pitch notes within `max_gap` seconds.
 
     basic-pitch re-fires onsets during breath release on sustained humming,
-    producing C4 C4 C4 sequences from a single held syllable. If two
-    consecutive notes share a pitch AND the second starts within `max_gap`
-    seconds of the first ending, treat them as one held note.
+    producing C4 C4 C4 sequences from a single held syllable. The right
+    interpretation is musical, not algorithmic — so we let the caller choose:
+
+    - ``merge``  collapse the run into a single held note (sum the durations).
+    - ``tie``    keep each onset as its own note but flag every note except the
+                 last in a run with ``tied_to_next=True`` so the renderer draws
+                 a VexFlow liaison.
+    - ``split``  do nothing, treat each onset as a distinct articulation.
+
+    A pair is considered "consecutive" when they share a pitch AND the second
+    starts within ``max_gap`` seconds of the first ending.
     """
-    if not notes:
+    if not notes or strategy == "split":
         return notes
 
-    out: List[Note] = [notes[0]]
+    out: List[Note] = [notes[0].model_copy()]
     for n in notes[1:]:
         prev = out[-1]
-        if n.pitch == prev.pitch and n.start - prev.end <= max_gap:
+        adjacent = n.pitch == prev.pitch and n.start - prev.end <= max_gap
+
+        if not adjacent:
+            out.append(n.model_copy())
+            continue
+
+        if strategy == "merge":
             out[-1] = Note(
                 pitch=prev.pitch,
                 start=prev.start,
                 end=max(prev.end, n.end),
                 velocity=max(prev.velocity, n.velocity),
+                tied_to_next=False,
             )
-        else:
-            out.append(n)
+        else:  # tie
+            out[-1] = prev.model_copy(update={"tied_to_next": True})
+            out.append(n.model_copy())
+
     return out
 
 
-def cleanup(notes: List[Note]) -> List[Note]:
+# Back-compat shim — older call sites and tests use the merge-only name.
+def dedup_consecutive_repeats(notes: List[Note], max_gap: float = 0.15) -> List[Note]:
+    """Deprecated alias — equivalent to ``group_consecutive_repeats(strategy='merge')``."""
+    return group_consecutive_repeats(notes, strategy="merge", max_gap=max_gap)
+
+
+def cleanup(notes: List[Note], options: CleanupOptions | None = None) -> List[Note]:
     """Apply the full amateur-friendly pipeline."""
     if not notes:
         return notes
+    strategy, max_gap = (options or CleanupOptions()).resolved()
     root = _detect_major_key_root(notes)
     snapped = snap_to_major_key(notes)
     transposed = transpose_to_c_major(snapped, root)
     normalized = normalize_octave(transposed)
     smoothed = smooth_octave_jumps(normalized)
-    return dedup_consecutive_repeats(smoothed)
+    return group_consecutive_repeats(smoothed, strategy=strategy, max_gap=max_gap)
