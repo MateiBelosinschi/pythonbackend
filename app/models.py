@@ -21,12 +21,24 @@ class Note(BaseModel):
 
 
 class TranscriptionResult(BaseModel):
-    """Output of /api/transcribe."""
+    """Output of /api/transcribe.
+
+    Two parallel views of the same hum:
+
+    - `notes` — quantized, monophonic, key-snapped. Drives the sheet music
+      (VexFlow) and the rhythmic grid.
+    - `raw_notes` — direct basic-pitch output, original timings preserved,
+      possibly polyphonic. Drives the piano playback so it sounds like
+      Spotify's basic-pitch demo.
+
+    Frontend renders `notes` on the staff and plays `raw_notes` on the piano.
+    """
 
     bpm: int = Field(FIXED_BPM, description="Always 120 — multi-tempo tracking is out of scope.")
     subdivision: int = Field(GRID_SUBDIVISION, description="Grid subdivision (16 = sixteenth notes).")
     time_signature: Literal["4/4"] = "4/4"
     notes: List[Note] = Field(default_factory=list)
+    raw_notes: List[Note] = Field(default_factory=list)
 
 
 class ExportRequest(BaseModel):

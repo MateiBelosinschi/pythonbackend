@@ -13,6 +13,7 @@ from __future__ import annotations
 import gc
 import os
 import tempfile
+from typing import List, Optional
 
 import numpy as np
 import pretty_midi
@@ -20,27 +21,28 @@ import soundfile as sf
 from basic_pitch import ICASSP_2022_MODEL_PATH
 from basic_pitch.inference import predict
 
+from app.models import Note
+
 _MODEL_PATH = ICASSP_2022_MODEL_PATH
 
 
 def transcribe(
     waveform: np.ndarray,
     sr: int,
-    onset_threshold: float = 0.6,
+    onset_threshold: float = 0.5,
     frame_threshold: float = 0.3,
-    minimum_note_length: float = 110.0,
-    minimum_frequency: float = 65.0,
-    maximum_frequency: float = 1000.0,
+    minimum_note_length: float = 11.0,
+    minimum_frequency: Optional[float] = None,
+    maximum_frequency: Optional[float] = 3000.0,
 ) -> pretty_midi.PrettyMIDI:
     """Run basic-pitch on a pre-processed waveform and return the resulting MIDI.
 
-    Tuned for closed-mouth sustained humming, where basic-pitch's defaults emit
-    glissando passing-tone fragments as the voice slides between target notes.
-    `minimum_note_length=110ms` kills sub-16th-note fragments (a real 16th at
-    120 BPM is 125 ms, so we're under it). `onset_threshold=0.6` rejects the
-    soft pitch-crossing "onsets" inside a slide while still catching syllable
-    attacks. Frequency band stays wide at 65 Hz so low male hum survives —
-    `melody_cleanup.normalize_octave` re-anchors to the treble afterward.
+    Defaults match the Spotify hosted demo exactly so the raw output (used for
+    piano playback) sounds the same as what the user already validated there:
+    onset 0.5, frame 0.3, min-note 11 ms, no min-freq filter, max 3000 Hz.
+    Downstream cleanup (quantize/monophonic/melody_cleanup) only feeds the
+    *sheet-music* view — playback uses these raw notes directly via
+    `pretty_midi_to_notes`.
     """
     fd, path = tempfile.mkstemp(suffix=".wav", prefix="musicme_")
     os.close(fd)
@@ -65,3 +67,26 @@ def transcribe(
     if not isinstance(midi_data, pretty_midi.PrettyMIDI):
         raise TypeError(f"Unexpected basic-pitch return type: {type(midi_data)!r}")
     return midi_data
+
+
+def pretty_midi_to_notes(pm: pretty_midi.PrettyMIDI) -> List[Note]:
+    """Flatten a PrettyMIDI to a sorted list of `Note` with timings unchanged.
+
+    This is the "playback" path: no quantization, no monophonic collapse, no
+    key-snapping — the same shape Spotify's basic-pitch demo plays back, just
+    re-encoded in our JSON contract so the frontend's piano sampler can play
+    it directly.
+    """
+    out: List[Note] = []
+    for inst in pm.instruments:
+        for n in inst.notes:
+            out.append(
+                Note(
+                    pitch=int(n.pitch),
+                    start=float(n.start),
+                    end=float(n.end),
+                    velocity=int(n.velocity),
+                )
+            )
+    out.sort(key=lambda n: (n.start, n.pitch))
+    return out

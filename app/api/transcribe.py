@@ -28,6 +28,12 @@ async def transcribe_endpoint(file: UploadFile = File(...)) -> TranscriptionResu
         raise HTTPException(status_code=400, detail=f"Could not decode audio: {exc}") from exc
 
     midi = transcriber.transcribe(waveform, sr)
+
+    # Two views of the same transcription:
+    # - raw_notes: original basic-pitch output, drives piano playback so it
+    #   sounds like Spotify's hosted demo (the user's reference quality).
+    # - notes: quantized/monophonic/key-snapped, drives the sheet music.
+    raw_notes = transcriber.pretty_midi_to_notes(midi)
     quantized = quantizer.quantize(midi)
     melody = monophonic.collapse_to_melody(quantized)
     cleaned = melody_cleanup.cleanup(melody)
@@ -36,4 +42,4 @@ async def transcribe_endpoint(file: UploadFile = File(...)) -> TranscriptionResu
     del waveform, midi, quantized, melody
     gc.collect()
 
-    return TranscriptionResult(notes=cleaned)
+    return TranscriptionResult(notes=cleaned, raw_notes=raw_notes)
