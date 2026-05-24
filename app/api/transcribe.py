@@ -31,14 +31,14 @@ async def transcribe_endpoint(file: UploadFile = File(...)) -> TranscriptionResu
 
     # Two views of the same transcription:
     # - raw_notes: basic-pitch output with original (unquantized) timings,
-    #   collapsed to monophonic. basic-pitch routinely emits 3-4 overlapping
-    #   notes per hummed onset (fundamental + harmonics + octave-error doubles).
-    #   On a synth voice (Spotify demo) those cluster inaudibly, but on a piano
-    #   sampler each one becomes a distinct key strike — `collapse_to_melody`
-    #   keeps the loudest per onset and drops the rest. No quantization, no
-    #   key-snap; the timings the user hummed are preserved.
+    #   forced strictly monophonic via overlap-drop + same-pitch merge.
+    #   basic-pitch routinely emits 3-4 overlapping notes per hummed onset
+    #   (fundamental + harmonics + octave-error doubles); on a synth voice
+    #   (Spotify demo) those cluster inaudibly, but on a piano sampler each
+    #   one becomes a distinct key strike. `monophonize_for_playback` enforces
+    #   the one-note-at-a-time invariant without snapping timings to any grid.
     # - notes: quantized/key-snapped on top, drives the sheet music.
-    raw_notes = monophonic.collapse_to_melody(transcriber.pretty_midi_to_notes(midi))
+    raw_notes = monophonic.monophonize_for_playback(transcriber.pretty_midi_to_notes(midi))
     quantized = quantizer.quantize(midi)
     melody = monophonic.collapse_to_melody(quantized)
     cleaned = melody_cleanup.cleanup(melody)
