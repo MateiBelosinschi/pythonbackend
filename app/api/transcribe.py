@@ -30,10 +30,15 @@ async def transcribe_endpoint(file: UploadFile = File(...)) -> TranscriptionResu
     midi = transcriber.transcribe(waveform, sr)
 
     # Two views of the same transcription:
-    # - raw_notes: original basic-pitch output, drives piano playback so it
-    #   sounds like Spotify's hosted demo (the user's reference quality).
-    # - notes: quantized/monophonic/key-snapped, drives the sheet music.
-    raw_notes = transcriber.pretty_midi_to_notes(midi)
+    # - raw_notes: basic-pitch output with original (unquantized) timings,
+    #   collapsed to monophonic. basic-pitch routinely emits 3-4 overlapping
+    #   notes per hummed onset (fundamental + harmonics + octave-error doubles).
+    #   On a synth voice (Spotify demo) those cluster inaudibly, but on a piano
+    #   sampler each one becomes a distinct key strike — `collapse_to_melody`
+    #   keeps the loudest per onset and drops the rest. No quantization, no
+    #   key-snap; the timings the user hummed are preserved.
+    # - notes: quantized/key-snapped on top, drives the sheet music.
+    raw_notes = monophonic.collapse_to_melody(transcriber.pretty_midi_to_notes(midi))
     quantized = quantizer.quantize(midi)
     melody = monophonic.collapse_to_melody(quantized)
     cleaned = melody_cleanup.cleanup(melody)
