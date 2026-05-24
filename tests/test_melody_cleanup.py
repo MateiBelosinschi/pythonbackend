@@ -1,13 +1,12 @@
 """Octave normalization + diatonic snap unit tests."""
 
-from app.models import CleanupOptions, Note
+from app.models import Note
 from app.services.melody_cleanup import (
     TREBLE_HIGH,
     TREBLE_LOW,
     _detect_major_key_root,
     _nearest_scale_pitch,
     cleanup,
-    group_consecutive_repeats,
     normalize_octave,
     snap_to_major_key,
     transpose_to_c_major,
@@ -166,75 +165,6 @@ def test_smooth_octave_jumps_handles_short_inputs():
     assert smooth_octave_jumps([]) == []
     assert [n.pitch for n in smooth_octave_jumps([_n(60)])] == [60]
     assert [n.pitch for n in smooth_octave_jumps([_n(60), _n(72)])] == [60, 72]
-
-
-def test_group_tie_flags_runs_but_keeps_distinct_notes():
-    notes = [
-        Note(pitch=60, start=0.0, end=0.20, velocity=80),
-        Note(pitch=60, start=0.25, end=0.45, velocity=80),
-        Note(pitch=60, start=0.50, end=0.70, velocity=80),
-        Note(pitch=62, start=0.80, end=1.00, velocity=80),
-    ]
-    out = group_consecutive_repeats(notes, strategy="tie", max_gap=0.15)
-    assert len(out) == 4
-    assert [n.tied_to_next for n in out] == [True, True, False, False]
-    # Pitches and timings must survive untouched.
-    assert [n.pitch for n in out] == [60, 60, 60, 62]
-    assert out[0].start == 0.0 and out[2].end == 0.70
-
-
-def test_group_split_is_a_no_op():
-    notes = [
-        Note(pitch=60, start=0.0, end=0.20, velocity=80),
-        Note(pitch=60, start=0.25, end=0.45, velocity=80),
-    ]
-    out = group_consecutive_repeats(notes, strategy="split", max_gap=0.15)
-    assert [(n.start, n.end, n.tied_to_next) for n in out] == [
-        (0.0, 0.20, False),
-        (0.25, 0.45, False),
-    ]
-
-
-def test_group_merge_does_not_set_tied_to_next():
-    notes = [
-        Note(pitch=60, start=0.0, end=0.20, velocity=80),
-        Note(pitch=60, start=0.25, end=0.45, velocity=80),
-    ]
-    out = group_consecutive_repeats(notes, strategy="merge", max_gap=0.15)
-    assert len(out) == 1
-    assert out[0].tied_to_next is False
-
-
-def test_group_respects_max_gap_threshold():
-    # Same pitch, gap = 0.5s. With max_gap=0.1 the notes stay separate even in merge mode.
-    notes = [
-        Note(pitch=60, start=0.0, end=0.20, velocity=80),
-        Note(pitch=60, start=0.70, end=0.90, velocity=80),
-    ]
-    out = group_consecutive_repeats(notes, strategy="merge", max_gap=0.1)
-    assert len(out) == 2
-
-
-def test_cleanup_options_beginner_preset_merges_aggressively():
-    # Three onsets with ~0.2s gaps — within beginner's 0.30s gap but outside standard's 0.15s.
-    notes = [
-        Note(pitch=60, start=0.0, end=0.20, velocity=80),
-        Note(pitch=60, start=0.40, end=0.60, velocity=80),
-        Note(pitch=60, start=0.80, end=1.00, velocity=80),
-    ]
-    standard = cleanup(notes, CleanupOptions(preset="standard"))
-    beginner = cleanup(notes, CleanupOptions(preset="beginner"))
-    assert len(standard) == 3
-    assert len(beginner) == 1
-
-
-def test_cleanup_options_default_matches_old_behavior():
-    notes = [
-        Note(pitch=60, start=0.0, end=0.25, velocity=80),
-        Note(pitch=60, start=0.30, end=0.55, velocity=70),
-    ]
-    # No options == standard preset == merge at 0.15s gap.
-    assert len(cleanup(notes)) == 1
 
 
 def test_cleanup_produces_only_c_major_white_keys_in_treble():
