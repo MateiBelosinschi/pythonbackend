@@ -28,16 +28,19 @@ def transcribe(
     sr: int,
     onset_threshold: float = 0.5,
     frame_threshold: float = 0.3,
-    minimum_note_length: float = 70.0,
+    minimum_note_length: float = 120.0,
     minimum_frequency: float = 65.0,
     maximum_frequency: float = 1000.0,
+    melodia_trick: bool = True,
 ) -> pretty_midi.PrettyMIDI:
     """Run basic-pitch on a pre-processed waveform and return the resulting MIDI.
 
-    Defaults match basic-pitch's own (and Spotify's hosted demo) so that raw
-    transcription quality is on par with what users hear there; the cleanup
-    layer downstream does the monophonic polishing. The frequency band is
-    widened to 65 Hz so low male humming (~A2/B2) isn't silently dropped.
+    Tuned for humming, not the general polyphonic case: `melodia_trick=True`
+    enables basic-pitch's monophonic post-processor (suppresses harmonic
+    siblings that otherwise show up as a stack of simultaneous notes), and
+    `minimum_note_length` is raised to basic-pitch's own default of 120 ms to
+    cut sub-grid filler blips from breath and vibrato wobble. The frequency
+    band is widened to 65 Hz so low male humming (~A2/B2) isn't dropped.
     """
     fd, path = tempfile.mkstemp(suffix=".wav", prefix="musicme_")
     os.close(fd)
@@ -51,6 +54,7 @@ def transcribe(
             minimum_note_length=minimum_note_length,
             minimum_frequency=minimum_frequency,
             maximum_frequency=maximum_frequency,
+            melodia_trick=melodia_trick,
         )
     finally:
         try:
