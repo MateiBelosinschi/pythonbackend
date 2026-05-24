@@ -34,12 +34,20 @@ def quantize(
     pm: pretty_midi.PrettyMIDI,
     bpm: int = FIXED_BPM,
     subdivision: int = GRID_SUBDIVISION,
+    max_bridge_seconds: float = 0.25,
 ) -> List[Note]:
     """Snap all notes in `pm` to a rigid `subdivision`-grid at `bpm`, return Concert Pitch JSON notes.
 
     A note whose start and end collapse onto the same grid cell is dropped — it
     represents a sub-grid blip (often a basic-pitch onset glitch) that the
     quantization explicitly disallows.
+
+    `max_bridge_seconds` controls legato extension: when two consecutive notes
+    have a gap smaller than this, the earlier note's end is extended to the
+    later note's start. This collapses the rest-spam between fragments that
+    basic-pitch produces from a single held hum. Gaps above the threshold
+    survive as genuine rests in the rendered score. Default 0.25 s = an 8th
+    rest at 120 BPM.
     """
     # Re-anchor tempo so pretty_midi's time<->tick maps reflect the target BPM.
     # We build a fresh PrettyMIDI at the fixed BPM and copy notes into it so that
@@ -52,6 +60,14 @@ def quantize(
                 pretty_midi.Note(velocity=n.velocity, pitch=n.pitch, start=n.start, end=n.end)
             )
     target.instruments.append(instrument)
+
+    instrument.notes.sort(key=lambda x: x.start)
+    for i in range(len(instrument.notes) - 1):
+        cur = instrument.notes[i]
+        nxt = instrument.notes[i + 1]
+        gap = nxt.start - cur.end
+        if 0.0 < gap <= max_bridge_seconds:
+            cur.end = nxt.start
 
     step = _grid_tick_step(target, subdivision)
     quantized: List[Note] = []
