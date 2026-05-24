@@ -28,17 +28,6 @@ async def transcribe_endpoint(file: UploadFile = File(...)) -> TranscriptionResu
         raise HTTPException(status_code=400, detail=f"Could not decode audio: {exc}") from exc
 
     midi = transcriber.transcribe(waveform, sr)
-
-    # Two views of the same transcription:
-    # - raw_notes: basic-pitch output with original (unquantized) timings,
-    #   forced strictly monophonic via overlap-drop + same-pitch merge.
-    #   basic-pitch routinely emits 3-4 overlapping notes per hummed onset
-    #   (fundamental + harmonics + octave-error doubles); on a synth voice
-    #   (Spotify demo) those cluster inaudibly, but on a piano sampler each
-    #   one becomes a distinct key strike. `monophonize_for_playback` enforces
-    #   the one-note-at-a-time invariant without snapping timings to any grid.
-    # - notes: quantized/key-snapped on top, drives the sheet music.
-    raw_notes = monophonic.monophonize_for_playback(transcriber.pretty_midi_to_notes(midi))
     quantized = quantizer.quantize(midi)
     melody = monophonic.collapse_to_melody(quantized)
     cleaned = melody_cleanup.cleanup(melody)
@@ -47,4 +36,4 @@ async def transcribe_endpoint(file: UploadFile = File(...)) -> TranscriptionResu
     del waveform, midi, quantized, melody
     gc.collect()
 
-    return TranscriptionResult(notes=cleaned, raw_notes=raw_notes)
+    return TranscriptionResult(notes=cleaned)

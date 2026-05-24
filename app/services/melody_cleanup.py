@@ -209,61 +209,12 @@ def dedup_consecutive_repeats(notes: List[Note], max_gap: float = 0.15) -> List[
     return out
 
 
-def remove_glissando_passing_tones(
-    notes: List[Note],
-    max_passing_duration: float = 0.12,
-    min_neighbour_duration: float = 0.15,
-) -> List[Note]:
-    """Drop intermediate-pitch fragments emitted while the voice slides between notes.
-
-    Closed-mouth sustained humming makes basic-pitch fire short "notes" at every
-    semitone the voice crosses on its way from one target pitch to another. They
-    show up as a brief note (<=`max_passing_duration` s) sandwiched between two
-    longer notes (>=`min_neighbour_duration` s) whose pitch sits strictly between
-    the neighbours' pitches AND when the neighbours are far enough apart that
-    something has to lie between them (>= 2 semitones).
-
-    Deliberately conservative: a real grace note typically has either a stronger
-    onset (so it'd be longer) or matches one of its neighbours' pitches. The
-    strict-between + 2-semitone-span check leaves real ornaments alone.
-    """
-    if len(notes) < 3:
-        return notes
-
-    kept: List[Note] = [notes[0]]
-    i = 1
-    while i < len(notes) - 1:
-        prev = kept[-1]
-        cur = notes[i]
-        nxt = notes[i + 1]
-        cur_dur = cur.end - cur.start
-        prev_dur = prev.end - prev.start
-        nxt_dur = nxt.end - nxt.start
-
-        lo, hi = min(prev.pitch, nxt.pitch), max(prev.pitch, nxt.pitch)
-        is_passing = (
-            cur_dur <= max_passing_duration
-            and prev_dur >= min_neighbour_duration
-            and nxt_dur >= min_neighbour_duration
-            and lo < cur.pitch < hi
-            and (hi - lo) >= 2
-        )
-        if not is_passing:
-            kept.append(cur)
-        i += 1
-    kept.append(notes[-1])
-    return kept
-
-
 def cleanup(notes: List[Note]) -> List[Note]:
     """Apply the full amateur-friendly pipeline."""
     if not notes:
         return notes
-    # Strip glissando artifacts BEFORE key detection so passing tones don't
-    # skew the pitch-class histogram toward the wrong key.
-    pruned = remove_glissando_passing_tones(notes)
-    root = _detect_major_key_root(pruned)
-    snapped = snap_to_major_key(pruned)
+    root = _detect_major_key_root(notes)
+    snapped = snap_to_major_key(notes)
     transposed = transpose_to_c_major(snapped, root)
     normalized = normalize_octave(transposed)
     smoothed = smooth_octave_jumps(normalized)
